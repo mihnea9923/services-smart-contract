@@ -5,9 +5,9 @@
 ////////////////////////////////////////////////////
 
 // Init:                                 1
-// Endpoints:                            9
+// Endpoints:                           10
 // Async Callback (empty):               1
-// Total number of exported functions:  11
+// Total number of exported functions:  12
 
 #![no_std]
 
@@ -27,6 +27,7 @@ multiversx_sc_wasm_adapter::endpoints! {
         subscribe => subscribe
         whitelist_token => whitelist_token
         register_service => register_service
+        collect_service_fees => collect_service_fees
         whitelistedTokens => whitelist_storage
         service => service_storage
         getDeposit => balance_storage
