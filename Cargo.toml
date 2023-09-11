@@ -1,0 +1,21 @@
+[package]
+name = "subscription-contract"
+version = "0.0.0"
+authors = [ "you",]
+edition = "2018"
+publish = false
+
+[lib]
+path = "src/empty.rs"
+
+[dependencies.pair]
+path = "../mx-exchange-sc/dex/pair"
+
+[dev-dependencies]
+num-bigint = "0.4.2"
+
+[dependencies.multiversx-sc]
+version = "0.43.2"
+
+[dev-dependencies.multiversx-sc-scenario]
+version = "0.43.2"
