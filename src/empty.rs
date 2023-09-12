@@ -16,6 +16,7 @@ pub struct Service<M : ManagedTypeApi> {
 
 #[derive(ManagedVecItem, TopEncode, TopDecode, NestedEncode, NestedDecode, TypeAbi, Clone)]
 pub struct Subscription<M : ManagedTypeApi> {
+    pub user : ManagedAddress<M>,
     pub service_id: BigUint<M>,
     pub last_payment: u64,
     pub token : EgldOrEsdtTokenIdentifier<M>
@@ -52,11 +53,18 @@ pub trait SubscriptionContractContract {
 
      #[endpoint]
      fn subscribe(&self, mut subscription : Subscription<Self::Api>) {
-        let caller = self.blockchain().get_caller();
         subscription.last_payment = self.blockchain().get_block_timestamp();
+        subscription.user = self.blockchain().get_caller();
         //TO DO: check the token is whitelisted
-        //TO DO: pay the first period of subscription
-        self.subscriptions_storage().insert(caller ,subscription);
+        let service = self.service_storage(&subscription.service_id).get();
+        self.pay_subscription(&mut subscription, &service);
+        self.subscriptions_storage().insert(subscription);
+     }
+
+     #[endpoint]
+     fn unsubscribe(&self, subscription : Subscription<Self::Api>) {
+        let caller = self.blockchain().get_caller();
+        self.subscriptions_storage().remove(&subscription);
      }
 
     //This method handles both registration and price + periodicity of a service
@@ -86,81 +94,50 @@ pub trait SubscriptionContractContract {
     #[endpoint]
     fn collect_service_fees(&self, service_id : BigUint) {
         let service = self.service_storage(&service_id).get();
-
-        for (caller, mut subscription) in self.subscriptions_storage().iter() {
+        for mut subscription in self.subscriptions_storage().iter() {
             if subscription.service_id == service_id {
-                let current_timestamp = self.blockchain().get_block_timestamp();
-                let time_since_last_payment = current_timestamp - subscription.last_payment;
-                subscription.last_payment = current_timestamp;
-                self.subscriptions_storage().insert(caller.clone(), subscription.clone());
-                //maybe there are 3 periods of time passing without this endpoint beeing called so the user would have to pay for all 3 of them
-                let times_to_pay = time_since_last_payment / service.expires_in + if time_since_last_payment % service.expires_in != 0 { 1 } else { 0 };
-                let pair_address = self.whitelist_storage(&subscription.token).get();
-
-                let payment = EgldOrEsdtTokenPayment::new(
-                    EgldOrEsdtTokenIdentifier::esdt(TokenIdentifier::from("USDC-c76f1f")),
-                    0,
-                    (times_to_pay * service.price).into()
-                );
-                // self.pair_proxy().contract(self.blockchain().get_owner_address()).get_safe_price(
-                //     pair_address,
-                //     current_timestamp,
-                //     current_timestamp - FIVE_MINUTES_AGO,
-                //     payment
-                // ).execute_on_dest_context();
-
-                //this should come as a reponse from the get_safe_price method
-                let value: u64 = 100;
-                let big_uint_variable: BigUint<Self::Api> = value.into();
-                self.balance_storage(&caller, &subscription.token).update(|deposit| *deposit -= big_uint_variable.clone());
-                self.send().direct(&service.owner, &subscription.token, 0, &big_uint_variable);
-                self.pay_dependent_services(&service, &subscription.token);
-                //TO DO: check if the user has enough funds for the next period, if not cancel the subscription
+                if self.blockchain().get_block_timestamp() - subscription.last_payment >= service.expires_in {
+                    self.pay_subscription(&mut subscription, &service);
+                }
             }
         }
     }
 
-    fn pay_subscription(&self, user: &ManagedAddress, service: &Service<Self::Api>, subscription : &mut Subscription<Self::Api>){
+   fn pay_subscription(&self, subscription : &mut Subscription<Self::Api>, service : &Service<Self::Api>) {
         let current_timestamp = self.blockchain().get_block_timestamp();
-        let time_since_last_payment = current_timestamp - subscription.last_payment;
         subscription.last_payment = current_timestamp;
-        self.subscriptions_storage().insert(user.clone(), subscription.clone());
-        //maybe there are 3 periods of time passing without this endpoint beeing called so the user would have to pay for all 3 of them
-        let times_to_pay = time_since_last_payment / service.expires_in + if time_since_last_payment % service.expires_in != 0 { 1 } else { 0 };
+        self.subscriptions_storage().insert(subscription.clone());
         let pair_address = self.whitelist_storage(&subscription.token).get();
-
-        let payment = EgldOrEsdtTokenPayment::new(
-            EgldOrEsdtTokenIdentifier::esdt(TokenIdentifier::from("USDC-c76f1f")),
-            0,
-            (times_to_pay * service.price).into()
-        );
-        // self.pair_proxy().contract(self.blockchain().get_owner_address()).get_safe_price(
-        //     pair_address,
-        //     current_timestamp,
-        //     current_timestamp - FIVE_MINUTES_AGO,
-        //     payment
-        // ).execute_on_dest_context();
-
-        //this should come as a reponse from the get_safe_price method
-        let value: u64 = 100;
-        let big_uint_variable: BigUint<Self::Api> = value.into();
-        self.balance_storage(&user, &subscription.token).update(|deposit| *deposit -= big_uint_variable.clone());
-        self.send().direct(&service.owner, &subscription.token, 0, &big_uint_variable);
-        self.pay_dependent_services(&service, &subscription.token);
         //TO DO: check if the user has enough funds for the next period, if not cancel the subscription
-    }
+        self.pay_services(&service, &subscription);
+   }
 
-    fn pay_dependent_services(&self, service: &Service<Self::Api>, token : &EgldOrEsdtTokenIdentifier) {
-        let mut dependencies = ManagedVec::<Self::Api, Service<Self::Api>>::new();
-        dependencies.push(service.clone());
+    fn pay_services(&self, service: &Service<Self::Api>, subscription : &Subscription<Self::Api>) {
+        let mut services = ManagedVec::<Self::Api, Service<Self::Api>>::new();
+        services.push(service.clone());
 
-        while dependencies.len() > 0 {
-            let head = dependencies.get(0);
-            dependencies.remove(0);
-            if head.id != service.id {
-                self.send().direct(&head.owner, &token, 0, &head.price.into());
-            }
-            dependencies.extend(&head.depends_on)
+        while services.len() > 0 {
+            let head = services.get(0);
+            services.remove(0);
+            let payment = EgldOrEsdtTokenPayment::new(
+                EgldOrEsdtTokenIdentifier::esdt(TokenIdentifier::from("USDC-c76f1f")),
+                0,
+                head.price.into()
+            );
+             // self.pair_proxy().contract(self.blockchain().get_owner_address()).get_safe_price(
+            //     pair_address,
+            //     current_timestamp,
+            //     current_timestamp - FIVE_MINUTES_AGO,
+            //     payment
+            // ).execute_on_dest_context();
+            
+            //this should come as a reponse from the get_safe_price method
+            let value: u64 = 100;
+            let big_uint_variable: BigUint<Self::Api> = value.into();
+
+            self.balance_storage(&subscription.user, &subscription.token).update(|deposit| *deposit -= big_uint_variable.clone());
+            self.send().direct(&head.owner, &subscription.token, 0, &big_uint_variable);
+            services.extend(&head.depends_on)
         }
     }
 
@@ -178,6 +155,6 @@ pub trait SubscriptionContractContract {
 
     #[view(usersubscriptions)]
     #[storage_mapper("subscriptions")]
-    fn subscriptions_storage(&self) -> MapMapper<ManagedAddress,Subscription<Self::Api>>;
+    fn subscriptions_storage(&self) -> SetMapper<Subscription<Self::Api>>;
     
 }
